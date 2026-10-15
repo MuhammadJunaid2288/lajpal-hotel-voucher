@@ -30,6 +30,25 @@ except ImportError:
 
 import pandas as pd
 
+def parse_date_flexible(s):
+    """Parse DD-MM-YY, DD/MM/YY, DD-MM-YYYY, YYYY-MM-DD etc."""
+    if not s or not str(s).strip():
+        return None
+    s = str(s).strip().replace("/", "-").replace(".", "-")
+    for fmt in ("%d-%m-%y", "%d-%m-%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+def calc_nights(checkin, checkout):
+    d1 = parse_date_flexible(checkin)
+    d2 = parse_date_flexible(checkout)
+    if d1 and d2 and d2 >= d1:
+        return (d2 - d1).days
+    return None
+
 DB_PATH = Path(__file__).parent / "vouchers.db"
 
 # ==================== DATABASE ====================
@@ -506,7 +525,11 @@ def generate_voucher_pdf(vid, path):
     instr = (v['special_instructions'] or '').replace('\n', '<br/>')
     instr_para = Paragraph(f"<b>Special Instructions:</b><br/>{instr}", tiny)
 
-    qr_link = f"Voucher: {v['voucher_no']}\nFamily: {v['family_head']}\nAgency: {agency}"
+    base_url = get_setting("app_public_url", "").strip().rstrip("/")
+    if base_url:
+        qr_link = f"{base_url}?view=voucher&id={vid}"
+    else:
+        qr_link = f"Voucher: {v['voucher_no']}\nFamily: {v['family_head']}\nAgency: {agency}"
     qr_img = None
     try:
         qr_api = f"https://api.qrserver.com/v1/create-qr-code/?size=100x100&margin=4&data={urllib.parse.quote(qr_link)}"
@@ -541,6 +564,91 @@ def generate_voucher_pdf(vid, path):
 # ==================== STREAMLIT UI ====================
 st.set_page_config(page_title="Lajpal Travel — Hotel Voucher", page_icon="🏨", layout="wide")
 init_db()
+
+# ========== PUBLIC VOUCHER VIEW (QR scan opens this) ==========
+qp = st.query_params
+if qp.get("view") == "voucher":
+    try:
+        pub_id = int(qp.get("id", 0))
+    except (TypeError, ValueError):
+        pub_id = 0
+    pub_v = get_voucher(pub_id) if pub_id else None
+    if not pub_v:
+        st.error("Voucher not found.")
+        st.stop()
+
+    agency = get_setting("agency_name", "LAJPAL TRAVEL LARKANA")
+    mutamers = get_mutamers(pub_id)
+    accs = get_accommodations(pub_id)
+    flights = get_flights(pub_id)
+
+    st.markdown("""
+    <style>
+        [data-testid="stSidebar"] { display: none; }
+        #MainMenu, footer { visibility: hidden; }
+        @media print { .no-print { display: none !important; } }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"### {agency}")
+    st.markdown(f"**Hotel Voucher** — `{pub_v['voucher_no']}`")
+    st.write(f"**Family Head:** {pub_v['family_head']}  |  **Date:** {pub_v['voucher_date']}  |  **Agent:** {pub_v['agent_name']} ({pub_v['agent_city']})")
+    st.write(f"**Package:** {pub_v['package_info']}  |  **PAX:** {pub_v['pax_info']}")
+    st.divider()
+
+    st.subheader("Mutamers")
+    if mutamers:
+        st.dataframe(pd.DataFrame([{
+            "SNO": m["sno"], "Passport": m["passport"], "Name": m["name"],
+            "G": m["gender"], "PAX": m["pax_type"], "Bed": m["bed"],
+            "Group No": m["group_no"], "Visa": m["visa_no"], "PNR": m["pnr"],
+        } for m in mutamers]), use_container_width=True, hide_index=True)
+    else:
+        st.info("No mutamers")
+
+    st.subheader("Accommodation")
+    if accs:
+        total_n = sum((a["nights"] or 0) for a in accs)
+        st.dataframe(pd.DataFrame([{
+            "City": a["city"], "Hotel": a["hotel_name"], "View": a["view_type"],
+            "Meal": a["meal"], "Conf#": a["conf_no"], "Room": a["room_type"],
+            "Checkin": a["checkin"], "Checkout": a["checkout"], "Nights": a["nights"],
+        } for a in accs]), use_container_width=True, hide_index=True)
+        st.markdown(f"**Total Nights: {total_n}**")
+    else:
+        st.info("No hotels")
+
+    st.subheader("Transport")
+    st.write(f"{pub_v['transport_transporter']} | {pub_v['transport_type']} | {pub_v['transport_desc']}")
+
+    st.subheader("Flights")
+    if flights:
+        st.dataframe(pd.DataFrame([{
+            "Direction": f["direction"], "Flight": f["flight_no"],
+            "Sector": f["sector"], "Departure": f["departure"], "Arrival": f["arrival"],
+        } for f in flights]), use_container_width=True, hide_index=True)
+
+    if pub_v["special_instructions"]:
+        st.subheader("Special Instructions")
+        st.write(pub_v["special_instructions"])
+
+    st.caption(f"Generated online | {datetime.now().strftime('%d-%b-%Y %H:%M')}")
+
+    st.markdown('<div class="no-print">', unsafe_allow_html=True)
+    st.info("Print: Ctrl+P (Windows) / Cmd+P (Mac)")
+    if REPORTLAB_OK:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            generate_voucher_pdf(pub_id, tmp.name)
+            with open(tmp.name, "rb") as f:
+                st.download_button("📄 Download PDF", f.read(),
+                                   file_name=f"Voucher_{pub_v['voucher_no']}.pdf",
+                                   mime="application/pdf")
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.stop()
 
 st.markdown("""
 <style>
@@ -684,6 +792,7 @@ elif page in ("➕ New Voucher", "✏️ Edit Voucher"):
 
     # --- Accommodation ---
     st.subheader("3. Accommodation (Hotels)")
+    st.caption("Check-in / Check-out date likho (format: 08-10-26 ya 08/10/2026) — **Nights auto calculate** ho jayengi Save pe.")
     if is_edit and edit_vid:
         existing_acc = [dict(a) for a in get_accommodations(edit_vid)]
     else:
@@ -715,6 +824,21 @@ elif page in ("➕ New Voucher", "✏️ Edit Voucher"):
         },
         key="acc_editor",
     )
+    # Live nights preview
+    try:
+        _preview = []
+        for _, row in edited_acc.iterrows():
+            city = str(row.get("city", "") or "")
+            hotel = str(row.get("hotel_name", "") or "")
+            n = calc_nights(row.get("checkin"), row.get("checkout"))
+            if n is not None:
+                _preview.append(f"**{city or hotel or 'Hotel'}**: {n} nights")
+            elif str(row.get("checkin") or "").strip() or str(row.get("checkout") or "").strip():
+                _preview.append(f"**{city or hotel or 'Hotel'}**: date format check karein (e.g. 08-10-26)")
+        if _preview:
+            st.info("Auto nights preview:  " + "  |  ".join(_preview))
+    except Exception:
+        pass
 
     # --- Transport ---
     st.subheader("4. Transport / Services")
@@ -798,6 +922,11 @@ elif page in ("➕ New Voucher", "✏️ Edit Voucher"):
 
                 acc_rows = edited_acc.to_dict("records")
                 acc_rows = [r for r in acc_rows if str(r.get("hotel_name", "")).strip() or str(r.get("city", "")).strip()]
+                # Auto-calculate nights from checkin/checkout
+                for r in acc_rows:
+                    n = calc_nights(r.get("checkin"), r.get("checkout"))
+                    if n is not None:
+                        r["nights"] = n
                 set_accommodations(vid, acc_rows)
 
                 fl_rows = edited_fl.to_dict("records")
@@ -815,6 +944,21 @@ elif page in ("➕ New Voucher", "✏️ Edit Voucher"):
 elif page == "⚙️ Agency Settings":
     st.markdown('<p class="main-title">Agency Settings</p>', unsafe_allow_html=True)
     st.caption("Yahan se agency name aur defaults edit ho sakte hain — har voucher pe apply hote hain.")
+    st.divider()
+
+    st.subheader("🔗 App Public URL (QR ke liye zaroori)")
+    st.caption("Streamlit Cloud ka link yahan paste karein. Example: https://lajpal-hotel-voucher.streamlit.app")
+    cur_url = get_setting("app_public_url", "")
+    new_url = st.text_input("Public App URL", value=cur_url, placeholder="https://your-app.streamlit.app")
+    if st.button("💾 Save App URL"):
+        set_setting("app_public_url", new_url.strip().rstrip("/"))
+        st.success("URL saved! Ab naya PDF banayein — QR scan pe voucher open hoga.")
+        st.rerun()
+    if cur_url:
+        st.info(f"Current: {cur_url}")
+    else:
+        st.warning("URL save kiye baghair QR mein sirf text hoga, link nahi.")
+
     st.divider()
 
     with st.form("settings_form"):
