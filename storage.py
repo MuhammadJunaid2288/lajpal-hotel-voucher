@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import pandas as pd
+import json
 from datetime import datetime
 
 class StorageManager:
@@ -8,7 +9,6 @@ class StorageManager:
         self.use_supabase = False
         self.supabase = None
         
-        # Check Streamlit secrets
         url = None
         key = None
         if secrets:
@@ -18,14 +18,12 @@ class StorageManager:
         if url and key:
             try:
                 from supabase import create_client, ClientOptions
-                # Direct HTTP timeout & fallback options
                 opts = ClientOptions(post_grest_client_timeout=10)
                 self.supabase = create_client(url, key, options=opts)
-                # Test query
                 self.supabase.table("vouchers").select("count", count="exact").execute()
                 self.use_supabase = True
             except Exception as e:
-                print(f"Supabase connection failed, fallback to SQLite: {e}")
+                print(f"Supabase connection error: {e}")
                 self.use_supabase = False
                 
         if not self.use_supabase:
@@ -83,7 +81,6 @@ class StorageManager:
             return True
 
     def save_voucher(self, voucher_no, data_dict):
-        import json
         if self.use_supabase:
             try:
                 self.supabase.table("vouchers").upsert({
@@ -102,7 +99,6 @@ class StorageManager:
             return True
 
     def get_voucher(self, voucher_no):
-        import json
         if self.use_supabase:
             try:
                 res = self.supabase.table("vouchers").select("data").eq("voucher_no", voucher_no).execute()
@@ -135,7 +131,6 @@ class StorageManager:
             except Exception:
                 return pd.DataFrame()
         else:
-            import json
             cursor = self.conn.cursor()
             cursor.execute("SELECT voucher_no, created_at, data FROM vouchers ORDER BY id DESC")
             rows = cursor.fetchall()
@@ -150,3 +145,9 @@ class StorageManager:
                     "City": d.get("city", "")
                 })
             return pd.DataFrame(records)
+
+# Aliases & helper functions for compatibility with app.py
+Storage = StorageManager
+
+def get_storage(secrets=None):
+    return StorageManager(secrets)
