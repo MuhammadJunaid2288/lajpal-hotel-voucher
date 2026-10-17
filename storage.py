@@ -8,8 +8,20 @@ from datetime import datetime
 
 DB_PATH = Path(__file__).parent / "vouchers.db"
 
+_SUPABASE_DISABLED = False  # set True if connection fails at runtime
+
+def _normalize_url(url):
+    url = str(url or "").strip().rstrip("/")
+    # common mistake: user pastes /rest/v1
+    if url.endswith("/rest/v1"):
+        url = url[: -len("/rest/v1")]
+    return url
+
 def _use_supabase():
-    """Return True only if Supabase secrets are properly set."""
+    """True if secrets exist and we have not disabled due to connect failure."""
+    global _SUPABASE_DISABLED
+    if _SUPABASE_DISABLED:
+        return False
     try:
         import streamlit as st
         secrets = getattr(st, "secrets", None)
@@ -20,16 +32,18 @@ def _use_supabase():
             key = secrets["SUPABASE_KEY"]
         except Exception:
             return False
-        url = str(url or "").strip()
+        url = _normalize_url(url)
         key = str(key or "").strip()
-        return len(url) > 0 and len(key) > 0
+        return len(url) > 8 and len(key) > 20
     except Exception:
         return False
 
 def _supabase():
     from supabase import create_client
     import streamlit as st
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    url = _normalize_url(st.secrets["SUPABASE_URL"])
+    key = str(st.secrets["SUPABASE_KEY"]).strip()
+    return create_client(url, key)
 
 # ---------- SQLite ----------
 def _sql_conn():
@@ -129,6 +143,27 @@ def storage_mode():
     except Exception:
         return "sqlite"
 
+def supabase_ok():
+    """True if secrets set AND server reachable."""
+    global _SUPABASE_DISABLED
+    if _SUPABASE_DISABLED or not _use_supabase():
+        return False
+    try:
+        _supabase().table("settings").select("key").limit(1).execute()
+        return True
+    except Exception:
+        _SUPABASE_DISABLED = True
+        return False
+
+def supabase_error_message():
+    if not _use_supabase():
+        return ""
+    try:
+        _supabase().table("settings").select("key").limit(1).execute()
+        return ""
+    except Exception as e:
+        return str(e)[:300]
+
 def get_setting(key, default=""):
     if _use_supabase():
         try:
@@ -170,9 +205,15 @@ def next_voucher_no():
     return f"UB-{datetime.now().strftime('%y')}0001"
 
 def get_all_vouchers():
+    global _SUPABASE_DISABLED
     if _use_supabase():
-        r = _supabase().table("vouchers").select("*").order("id", desc=True).execute()
-        return r.data or []
+        try:
+            r = _supabase().table("vouchers").select("*").order("id", desc=True).execute()
+            return r.data or []
+        except Exception as e:
+            _SUPABASE_DISABLED = True  # stop retrying every call
+            # fall through to sqlite so app still opens
+            pass
     conn = _sql_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM vouchers ORDER BY id DESC")

@@ -93,7 +93,7 @@ def sync_acc_dates(row):
 
 
 from storage import (
-    init_db, get_setting, set_setting, storage_mode,
+    init_db, get_setting, set_setting, storage_mode, supabase_ok, supabase_error_message,
     next_voucher_no, get_all_vouchers, get_voucher, create_voucher, update_voucher, delete_voucher,
     get_mutamers, set_mutamers, get_accommodations, set_accommodations, get_flights, set_flights,
 )
@@ -442,6 +442,47 @@ if qp.get("view") == "voucher":
     st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
+# ========== ADMIN GATE (public users only see voucher via QR) ==========
+def _admin_password():
+    # Prefer Streamlit secrets, else settings, else default
+    try:
+        import streamlit as st
+        if "ADMIN_PASSWORD" in st.secrets:
+            return str(st.secrets["ADMIN_PASSWORD"])
+    except Exception:
+        pass
+    return get_setting("admin_password", "lajpal123")
+
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
+
+if not st.session_state.is_admin:
+    st.markdown("""
+    <style>
+        [data-testid="stSidebar"] { display: none; }
+        #MainMenu, footer { visibility: hidden; }
+    </style>
+    """, unsafe_allow_html=True)
+    agency = get_setting("agency_name", "LAJPAL TRAVEL LARKANA")
+    st.markdown(f"## {agency}")
+    st.markdown("### Hotel / Umrah Voucher")
+    st.info(
+        "Customer ho? Apne **voucher PDF** ka **QR code** scan karein — "
+        "sirf aapka voucher khulega.\n\n"
+        "Staff ho? Neeche login karein."
+    )
+    with st.expander("🔐 Staff Login", expanded=False):
+        pw = st.text_input("Password", type="password", key="admin_pw_input")
+        if st.button("Login", type="primary"):
+            if pw == _admin_password():
+                st.session_state.is_admin = True
+                st.success("Login OK")
+                st.rerun()
+            else:
+                st.error("Galat password")
+    st.caption("Public users can only open a voucher via QR link.")
+    st.stop()
+
 st.markdown("""
 <style>
 .main-title { font-size: 1.5rem; font-weight: 700; color: #1a365d; }
@@ -457,9 +498,12 @@ with st.sidebar:
     except Exception:
         mode = "sqlite"
     if mode == "supabase":
-        st.success("Online DB — data permanent")
+        if supabase_ok():
+            st.success("Online DB — connected")
+        else:
+            st.error("Supabase connect fail — URL/key check karein")
     else:
-        st.info("Local / Cloud file storage")
+        st.info("Local SQLite mode")
     st.divider()
     page = st.radio("Menu", [
         "📋 All Vouchers",
@@ -467,6 +511,10 @@ with st.sidebar:
         "✏️ Edit Voucher",
         "⚙️ Agency Settings",
     ], label_visibility="collapsed")
+    st.divider()
+    if st.button("Logout"):
+        st.session_state.is_admin = False
+        st.rerun()
 
 # ==================== ALL VOUCHERS ====================
 if page == "📋 All Vouchers":
@@ -475,6 +523,12 @@ if page == "📋 All Vouchers":
     st.divider()
 
     vouchers = get_all_vouchers()
+    if storage_mode() == "supabase" and not supabase_ok():
+        st.warning(
+            "Supabase connect nahi ho raha — abhi temporary local mode.\n\n"
+            "**Fix:** Supabase → Project Settings → API → **Project URL** copy karo "
+            "(sirf `https://xxxxx.supabase.co`, `/rest/v1` mat lagao) aur Secrets mein Save + Reboot."
+        )
     if not vouchers:
         st.info("Abhi koi voucher nahi. **➕ New Voucher** se pehla voucher banayein.")
     else:
@@ -774,17 +828,28 @@ elif page == "⚙️ Agency Settings":
     st.divider()
 
     st.subheader("🔗 App Public URL (QR ke liye zaroori)")
-    st.caption("Streamlit Cloud ka link yahan paste karein. Example: https://lajpal-hotel-voucher.streamlit.app")
+    st.caption("Streamlit Cloud ka link yahan paste karein. Example: https://lajpal-hotel-voucher-xxxx.streamlit.app")
     cur_url = get_setting("app_public_url", "")
     new_url = st.text_input("Public App URL", value=cur_url, placeholder="https://your-app.streamlit.app")
     if st.button("💾 Save App URL"):
         set_setting("app_public_url", new_url.strip().rstrip("/"))
-        st.success("URL saved! Ab naya PDF banayein — QR scan pe voucher open hoga.")
+        st.success("URL saved! Ab naya PDF banayein — QR scan pe sirf voucher open hoga.")
         st.rerun()
     if cur_url:
         st.info(f"Current: {cur_url}")
+        st.code(f"{cur_url.rstrip('/')}?view=voucher&id=1", language=None)
+        st.caption("QR isi format ki link use karta hai — public user ko sirf voucher dikhega, admin nahi.")
     else:
         st.warning("URL save kiye baghair QR mein sirf text hoga, link nahi.")
+
+    st.subheader("🔐 Staff Login Password")
+    st.caption("Public app pe staff login isi password se hoga. Default: lajpal123")
+    cur_pw = get_setting("admin_password", "lajpal123")
+    new_pw = st.text_input("Admin Password", value=cur_pw, type="password")
+    if st.button("💾 Save Password"):
+        set_setting("admin_password", new_pw.strip() or "lajpal123")
+        st.success("Password saved")
+        st.rerun()
 
     st.divider()
 
