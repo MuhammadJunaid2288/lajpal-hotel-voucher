@@ -49,265 +49,57 @@ def calc_nights(checkin, checkout):
         return (d2 - d1).days
     return None
 
-DB_PATH = Path(__file__).parent / "vouchers.db"
+def calc_checkout(checkin, nights):
+    """Check-in + nights number -> checkout date string DD-MM-YY"""
+    d1 = parse_date_flexible(checkin)
+    try:
+        n = int(float(nights))
+    except (TypeError, ValueError):
+        return None
+    if d1 and n >= 0:
+        return (d1 + __import__('datetime').timedelta(days=n)).strftime("%d-%m-%y")
+    return None
 
-# ==================== DATABASE ====================
-def get_conn():
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+def sync_acc_dates(row):
+    """Auto-fill nights from dates, OR checkout from checkin+nights."""
+    r = dict(row)
+    ci, co, n = r.get("checkin"), r.get("checkout"), r.get("nights")
+    nights_val = None
+    try:
+        if n is not None and str(n).strip() != "":
+            nights_val = int(float(n))
+    except (TypeError, ValueError):
+        nights_val = None
 
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS vouchers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            voucher_no TEXT UNIQUE,
-            manual_no TEXT,
-            voucher_date TEXT,
-            agent_name TEXT,
-            agent_city TEXT,
-            whatsapp TEXT,
-            package_info TEXT,
-            pax_info TEXT,
-            family_head TEXT,
-            transport_transporter TEXT,
-            transport_type TEXT,
-            transport_desc TEXT,
-            special_instructions TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS mutamers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            voucher_id INTEGER,
-            sno INTEGER,
-            passport TEXT,
-            name TEXT,
-            gender TEXT,
-            pax_type TEXT,
-            bed TEXT,
-            group_no TEXT,
-            visa_no TEXT,
-            pnr TEXT,
-            FOREIGN KEY (voucher_id) REFERENCES vouchers(id)
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS accommodations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            voucher_id INTEGER,
-            city TEXT,
-            hotel_name TEXT,
-            view_type TEXT,
-            meal TEXT,
-            conf_no TEXT,
-            room_type TEXT,
-            checkin TEXT,
-            checkout TEXT,
-            nights INTEGER,
-            FOREIGN KEY (voucher_id) REFERENCES vouchers(id)
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS flights (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            voucher_id INTEGER,
-            direction TEXT,
-            flight_no TEXT,
-            sector TEXT,
-            departure TEXT,
-            arrival TEXT,
-            FOREIGN KEY (voucher_id) REFERENCES vouchers(id)
-        )
-    """)
-    # Default settings
-    defaults = {
-        "agency_name": "LAJPAL TRAVEL LARKANA",
-        "agency_subtitle": "(PVT) LTD.",
-        "default_agent": "",
-        "default_city": "Larkana",
-        "default_whatsapp": "",
-        "default_instructions": (
-            "- آپ ہوٹل اور ٹرانسپورٹ کی ہدایات پر عمل کریں۔\n"
-            "- چیک اِن / چیک آؤٹ اوقات کا خیال رکھیں۔\n"
-            "- پاسپورٹ اور ضروری دستاویزات ساتھ رکھیں۔\n"
-            "- کسی مسئلے کی صورت میں فوری ایجنسی سے رابطہ کریں۔"
-        ),
-    }
-    for k, v in defaults.items():
-        cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
-    conn.commit()
-    conn.close()
+    # If both dates present -> nights
+    calculated = calc_nights(ci, co)
+    if calculated is not None:
+        r["nights"] = calculated
+        return r
+    # If checkin + nights number -> checkout
+    if parse_date_flexible(ci) and nights_val is not None and not (co and str(co).strip()):
+        out = calc_checkout(ci, nights_val)
+        if out:
+            r["checkout"] = out
+            r["nights"] = nights_val
+        return r
+    # If checkin + nights and checkout empty-ish
+    if parse_date_flexible(ci) and nights_val is not None:
+        out = calc_checkout(ci, nights_val)
+        if out:
+            r["checkout"] = out
+            r["nights"] = nights_val
+    return r
 
-def get_setting(key, default=""):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT value FROM settings WHERE key=?", (key,))
-    row = cur.fetchone()
-    conn.close()
-    return row["value"] if row else default
 
-def set_setting(key, value):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
-
-def next_voucher_no():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT voucher_no FROM vouchers ORDER BY id DESC LIMIT 1")
-    row = cur.fetchone()
-    conn.close()
-    if row and row["voucher_no"]:
-        # UB-101678 style
-        parts = row["voucher_no"].rsplit("-", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            return f"{parts[0]}-{int(parts[1])+1:06d}"
-    return f"UB-{datetime.now().strftime('%y')}0001"
-
-def create_voucher(data):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO vouchers (
-            voucher_no, manual_no, voucher_date, agent_name, agent_city, whatsapp,
-            package_info, pax_info, family_head, transport_transporter, transport_type,
-            transport_desc, special_instructions
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
-        data["voucher_no"], data.get("manual_no",""), data["voucher_date"],
-        data["agent_name"], data["agent_city"], data.get("whatsapp",""),
-        data.get("package_info",""), data.get("pax_info",""), data["family_head"],
-        data.get("transport_transporter",""), data.get("transport_type",""),
-        data.get("transport_desc",""), data.get("special_instructions","")
-    ))
-    vid = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return vid
-
-def update_voucher(vid, data):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE vouchers SET
-            voucher_no=?, manual_no=?, voucher_date=?, agent_name=?, agent_city=?, whatsapp=?,
-            package_info=?, pax_info=?, family_head=?, transport_transporter=?, transport_type=?,
-            transport_desc=?, special_instructions=?
-        WHERE id=?
-    """, (
-        data["voucher_no"], data.get("manual_no",""), data["voucher_date"],
-        data["agent_name"], data["agent_city"], data.get("whatsapp",""),
-        data.get("package_info",""), data.get("pax_info",""), data["family_head"],
-        data.get("transport_transporter",""), data.get("transport_type",""),
-        data.get("transport_desc",""), data.get("special_instructions",""), vid
-    ))
-    conn.commit()
-    conn.close()
-
-def delete_voucher(vid):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM mutamers WHERE voucher_id=?", (vid,))
-    cur.execute("DELETE FROM accommodations WHERE voucher_id=?", (vid,))
-    cur.execute("DELETE FROM flights WHERE voucher_id=?", (vid,))
-    cur.execute("DELETE FROM vouchers WHERE id=?", (vid,))
-    conn.commit()
-    conn.close()
-
-def get_all_vouchers():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM vouchers ORDER BY id DESC")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def get_voucher(vid):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM vouchers WHERE id=?", (vid,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-def get_mutamers(vid):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM mutamers WHERE voucher_id=? ORDER BY sno, id", (vid,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def set_mutamers(vid, rows):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM mutamers WHERE voucher_id=?", (vid,))
-    for i, r in enumerate(rows, 1):
-        cur.execute("""
-            INSERT INTO mutamers (voucher_id, sno, passport, name, gender, pax_type, bed, group_no, visa_no, pnr)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
-        """, (vid, i, r.get("passport",""), r.get("name",""), r.get("gender","M"),
-              r.get("pax_type","Adult"), r.get("bed","Yes"), r.get("group_no",""),
-              r.get("visa_no",""), r.get("pnr","")))
-    conn.commit()
-    conn.close()
-
-def get_accommodations(vid):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM accommodations WHERE voucher_id=? ORDER BY id", (vid,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def set_accommodations(vid, rows):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM accommodations WHERE voucher_id=?", (vid,))
-    for r in rows:
-        cur.execute("""
-            INSERT INTO accommodations (voucher_id, city, hotel_name, view_type, meal, conf_no, room_type, checkin, checkout, nights)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
-        """, (vid, r.get("city",""), r.get("hotel_name",""), r.get("view_type","Standard"),
-              r.get("meal","RO"), r.get("conf_no",""), r.get("room_type",""),
-              r.get("checkin",""), r.get("checkout",""), r.get("nights",0)))
-    conn.commit()
-    conn.close()
-
-def get_flights(vid):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM flights WHERE voucher_id=? ORDER BY id", (vid,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-def set_flights(vid, rows):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM flights WHERE voucher_id=?", (vid,))
-    for r in rows:
-        cur.execute("""
-            INSERT INTO flights (voucher_id, direction, flight_no, sector, departure, arrival)
-            VALUES (?,?,?,?,?,?)
-        """, (vid, r.get("direction",""), r.get("flight_no",""), r.get("sector",""),
-              r.get("departure",""), r.get("arrival","")))
-    conn.commit()
-    conn.close()
+from storage import (
+    init_db, get_setting, set_setting, storage_mode,
+    next_voucher_no, get_all_vouchers, get_voucher, create_voucher, update_voucher, delete_voucher,
+    get_mutamers, set_mutamers, get_accommodations, set_accommodations, get_flights, set_flights,
+)
 
 # ==================== PDF ====================
+
 def generate_voucher_pdf(vid, path):
     if not REPORTLAB_OK:
         raise Exception("reportlab required")
@@ -660,6 +452,11 @@ st.markdown("""
 with st.sidebar:
     st.markdown("### 🏨 Hotel Voucher")
     st.caption(get_setting("agency_name", "LAJPAL TRAVEL LARKANA"))
+    mode = storage_mode()
+    if mode == "supabase":
+        st.success("☁ Online DB — data permanent")
+    else:
+        st.info("💾 Local SQLite — PC pe permanent")
     st.divider()
     page = st.radio("Menu", [
         "📋 All Vouchers",
@@ -691,6 +488,32 @@ if page == "📋 All Vouchers":
                 "Package": v["package_info"],
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # Excel backup
+        try:
+            import io
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                pd.DataFrame(rows).to_excel(writer, sheet_name="Vouchers", index=False)
+                all_mut, all_acc, all_fl = [], [], []
+                for v in vouchers:
+                    for m in get_mutamers(v["id"]):
+                        all_mut.append({**dict(m), "voucher_no": v["voucher_no"]})
+                    for a in get_accommodations(v["id"]):
+                        all_acc.append({**dict(a), "voucher_no": v["voucher_no"]})
+                    for f in get_flights(v["id"]):
+                        all_fl.append({**dict(f), "voucher_no": v["voucher_no"]})
+                if all_mut:
+                    pd.DataFrame(all_mut).to_excel(writer, sheet_name="Mutamers", index=False)
+                if all_acc:
+                    pd.DataFrame(all_acc).to_excel(writer, sheet_name="Hotels", index=False)
+                if all_fl:
+                    pd.DataFrame(all_fl).to_excel(writer, sheet_name="Flights", index=False)
+            st.download_button("📥 Backup Excel (sab data)", buf.getvalue(),
+                               file_name=f"vouchers_backup_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as e:
+            st.caption(f"Excel backup: {e}")
 
         st.subheader("Download / Delete")
         c1, c2 = st.columns(2)
@@ -792,7 +615,7 @@ elif page in ("➕ New Voucher", "✏️ Edit Voucher"):
 
     # --- Accommodation ---
     st.subheader("3. Accommodation (Hotels)")
-    st.caption("Check-in / Check-out date likho (format: 08-10-26 ya 08/10/2026) — **Nights auto calculate** ho jayengi Save pe.")
+    st.caption("Option A: Check-in + Check-out → nights auto.  |  Option B: Check-in + Nights number → checkout auto. Format: 08-10-26")
     if is_edit and edit_vid:
         existing_acc = [dict(a) for a in get_accommodations(edit_vid)]
     else:
@@ -824,19 +647,23 @@ elif page in ("➕ New Voucher", "✏️ Edit Voucher"):
         },
         key="acc_editor",
     )
-    # Live nights preview
+    # Live auto preview (nights OR checkout)
     try:
         _preview = []
         for _, row in edited_acc.iterrows():
             city = str(row.get("city", "") or "")
             hotel = str(row.get("hotel_name", "") or "")
+            label = city or hotel or "Hotel"
+            synced = sync_acc_dates(row)
             n = calc_nights(row.get("checkin"), row.get("checkout"))
             if n is not None:
-                _preview.append(f"**{city or hotel or 'Hotel'}**: {n} nights")
-            elif str(row.get("checkin") or "").strip() or str(row.get("checkout") or "").strip():
-                _preview.append(f"**{city or hotel or 'Hotel'}**: date format check karein (e.g. 08-10-26)")
+                _preview.append(f"**{label}**: {n} nights (dates se)")
+            else:
+                co = calc_checkout(row.get("checkin"), row.get("nights"))
+                if co:
+                    _preview.append(f"**{label}**: checkout auto → {co}")
         if _preview:
-            st.info("Auto nights preview:  " + "  |  ".join(_preview))
+            st.info("Auto:  " + "  |  ".join(_preview))
     except Exception:
         pass
 
@@ -922,11 +749,8 @@ elif page in ("➕ New Voucher", "✏️ Edit Voucher"):
 
                 acc_rows = edited_acc.to_dict("records")
                 acc_rows = [r for r in acc_rows if str(r.get("hotel_name", "")).strip() or str(r.get("city", "")).strip()]
-                # Auto-calculate nights from checkin/checkout
-                for r in acc_rows:
-                    n = calc_nights(r.get("checkin"), r.get("checkout"))
-                    if n is not None:
-                        r["nights"] = n
+                # Auto: dates->nights OR checkin+nights->checkout
+                acc_rows = [sync_acc_dates(r) for r in acc_rows]
                 set_accommodations(vid, acc_rows)
 
                 fl_rows = edited_fl.to_dict("records")
