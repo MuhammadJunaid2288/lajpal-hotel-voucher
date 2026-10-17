@@ -452,11 +452,14 @@ st.markdown("""
 with st.sidebar:
     st.markdown("### 🏨 Hotel Voucher")
     st.caption(get_setting("agency_name", "LAJPAL TRAVEL LARKANA"))
-    mode = storage_mode()
+    try:
+        mode = storage_mode()
+    except Exception:
+        mode = "sqlite"
     if mode == "supabase":
-        st.success("☁ Online DB — data permanent")
+        st.success("Online DB — data permanent")
     else:
-        st.info("💾 Local SQLite — PC pe permanent")
+        st.info("Local / Cloud file storage")
     st.divider()
     page = st.radio("Menu", [
         "📋 All Vouchers",
